@@ -1,30 +1,21 @@
-
-### notion_quadrant_manager.py
-
 import json
 import os
 import re
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-import dateparser
 import requests
 
-NOTION_VERSION = os.getenv("NOTION_VERSION", "2026-03-11")
+NOTION_VERSION = "2025-09-03"
 NOTION_BASE_URL = "https://api.notion.com/v1"
-SG_TZ = ZoneInfo("Asia/Singapore")
-STATE_PATH = Path(
-    os.getenv(
-        "OPENCLAW_NOTION_QM_STATE",
-        str(Path(".") / "notion_quadrant_manager_state.json"),
-    )
-)
+TIMEZONE = ZoneInfo("Asia/Singapore")
 
-HIGH_PRIORITY_HINTS = ("高", "重要", "紧急", "high", "urgent", "p1", "p0", "1")
-LOW_PRIORITY_HINTS = ("低", "不重要", "普通", "low", "p3", "p4", "2", "3")
+STATE_DIR = Path(os.getenv("OPENCLAW_STATE_DIR", "."))
+STATE_PATH = STATE_DIR / "notion_quadrant_manager_state.json"
+
 DONE_STATUS_HINTS = ("已完成", "完成", "done", "complete", "completed", "finished")
 CANCEL_STATUS_HINTS = ("已取消", "取消", "canceled", "cancelled", "aborted", "void")
 TODO_STATUS_HINTS = ("未完成", "待办", "todo", "to do", "not started", "进行中", "in progress", "未开始")
@@ -32,7 +23,7 @@ TODO_STATUS_HINTS = ("未完成", "待办", "todo", "to do", "not started", "进
 FIELD_ALIASES = {
     "title": ["待办事项", "待办", "标题", "task", "name", "title", "事项", "任务"],
     "due": ["截止时间", "截止日期", "due date", "due", "deadline", "日期", "时间", "到期"],
-    "priority": ["优先级", "priority", "重要程度", "等级","四象限"],
+    "quadrant": ["四象限", "优先级", "priority", "重要程度", "等级"],
     "status": ["状态", "status", "进度"],
     "note": ["备注", "note", "备注说明", "说明", "描述", "details", "detail"],
     "category": ["分类", "category", "tag", "tags", "类别", "分组"],
@@ -55,16 +46,17 @@ class APIError(NotionQMError):
     pass
 
 
-def sg_now() -> datetime:
-    return datetime.now(tz=SG_TZ)
+def now() -> datetime:
+    return datetime.now(tz=TIMEZONE)
 
 
-def sg_today() -> date:
-    return sg_now().date()
+def today() -> date:
+    return now().date()
 
 
 def norm(text: Any) -> str:
-    return re.sub(r"\s+", "", str(text or "")).strip().lower()
+    text_str = str(text or "")[:1000]
+    return re.sub(r"\s+", "", text_str).strip().lower()
 
 
 def state_load() -> Dict[str, Any]:
@@ -77,8 +69,11 @@ def state_load() -> Dict[str, Any]:
 
 
 def state_save(state: Dict[str, Any]) -> None:
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        raise NotionQMError(f"状态保存失败：{exc}") from exc
 
 
 def json_output(ok: bool, action: str, message: str, data: Optional[Dict[str, Any]] = None) -> None:
@@ -113,6 +108,10 @@ def notion_request(
             timeout=45,
         )
     except requests.RequestException as exc:
+        if isinstance(exc, requests.Timeout):
+            raise APIError("Notion 请求超时，请检查网络连接") from exc
+        if isinstance(exc, requests.ConnectionError):
+            raise APIError("Notion 连接失败，请检查网络连接") from exc
         raise APIError(f"Notion 请求失败：{exc}") from exc
 
     if not resp.ok:
@@ -122,6 +121,18 @@ def notion_request(
             detail = err.get("message") or err.get("error") or resp.text
         except Exception:
             detail = resp.text
+        
+        if resp.status_code == 401:
+            raise APIError("API 密钥无效，请检查 API 密钥是否正确")
+        if resp.status_code == 403:
+            raise APIError("权限不足，请检查 API 密钥权限")
+        if resp.status_code == 404:
+            raise APIError("资源不存在，请检查数据库名称是否正确")
+        if resp.status_code == 429:
+            raise APIError("API 调用过于频繁，请稍后重试")
+        if resp.status_code >= 500:
+            raise APIError("Notion 服务器错误，请稍后重试")
+            
         raise APIError(f"Notion API 返回错误 {resp.status_code}：{detail}")
 
     if resp.text.strip():
@@ -268,7 +279,7 @@ def extract_options(prop: Dict[str, Any]) -> List[str]:
     return names
 
 
-def find_property(schema: Dict[str, Any], wanted: str, required_types: Iterable[str]) -> Dict[str, Any]:
+def find_property(schema: Dict[str, Any], wanted: str, required_types: List[str]) -> Dict[str, Any]:
     wanted_aliases = [norm(x) for x in FIELD_ALIASES[wanted]]
     matched: List[Tuple[int, str, Dict[str, Any]]] = []
     for key, prop in prop_items(schema):
@@ -291,7 +302,7 @@ def build_field_map(schema: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     fields = {}
     fields["title"] = find_property(schema, "title", ["title"])
     fields["due"] = find_property(schema, "due", ["date"])
-    fields["priority"] = find_property(schema, "priority", ["select", "status", "multi_select"])
+    fields["quadrant"] = find_property(schema, "quadrant", ["select", "status", "multi_select"])
     fields["status"] = find_property(schema, "status", ["status", "select"])
     fields["note"] = find_property(schema, "note", ["rich_text", "title"])
     fields["category"] = find_property(schema, "category", ["multi_select", "select"])
@@ -316,7 +327,7 @@ def option_names(prop: Dict[str, Any]) -> List[str]:
     return []
 
 
-def choose_option(prop: Dict[str, Any], preferred: Iterable[str], fallback_first: bool = True) -> str:
+def choose_option(prop: Dict[str, Any], preferred: List[str], fallback_first: bool = True) -> str:
     opts = option_names(prop)
     if not opts:
         raise SchemaError(f"字段 {prop.get('name', '')} 没有可用枚举值。")
@@ -331,28 +342,6 @@ def choose_option(prop: Dict[str, Any], preferred: Iterable[str], fallback_first
     raise SchemaError(f"无法为字段 {prop.get('name', '')} 选择可用枚举值。")
 
 
-def priority_level(prop: Dict[str, Any], value: Optional[str]) -> Tuple[str, int]:
-    if not value:
-        value = choose_option(prop, ["中", "medium", "普通", "normal", "一般"], True)
-    opts = option_names(prop)
-    if not opts:
-        return value, 0
-    nv = norm(value)
-    for idx, opt in enumerate(opts):
-        no = norm(opt)
-        if no == nv:
-            if any(h in no for h in HIGH_PRIORITY_HINTS):
-                return opt, 1
-            if any(h in no for h in LOW_PRIORITY_HINTS):
-                return opt, 0
-            return opt, 2 if idx < max(1, len(opts) // 2) else 0
-    for opt in opts:
-        no = norm(opt)
-        if any(h in no for h in HIGH_PRIORITY_HINTS):
-            return opt, 2
-    return opts[0], 1 if len(opts) == 1 else 0
-
-
 def status_value(prop: Dict[str, Any], kind: str) -> str:
     if kind == "done":
         return choose_option(prop, DONE_STATUS_HINTS, True)
@@ -365,28 +354,6 @@ def rich_text_payload(text: str) -> List[Dict[str, Any]]:
     return [{"type": "text", "text": {"content": text}}]
 
 
-def parse_date_text(text: str) -> Tuple[Optional[date], Optional[str], str]:
-    if not text:
-        return None, None, ""
-    settings = {
-        "TIMEZONE": "Asia/Singapore",
-        "RETURN_AS_TIMEZONE_AWARE": False,
-        "PREFER_DATES_FROM": "future",
-        "RELATIVE_BASE": sg_now().replace(tzinfo=None),
-    }
-    found = dateparser.search.search_dates(text, languages=["zh", "en"], settings=settings)
-    if not found:
-        dt = dateparser.parse(text, languages=["zh", "en"], settings=settings)
-        if not dt:
-            return None, None, text.strip()
-        return dt.date(), text.strip(), text.strip()
-    matched_text, dt = found[0]
-    due = dt.date()
-    title = text.replace(matched_text, "", 1).strip()
-    title = re.sub(r"^[\s,，。．·\-—:：]+", "", title)
-    return due, matched_text, title or text.strip()
-
-
 def page_value(page: Dict[str, Any], prop: Dict[str, Any], key_hint: str) -> Any:
     props = page.get("properties") or {}
     candidates = []
@@ -395,12 +362,10 @@ def page_value(page: Dict[str, Any], prop: Dict[str, Any], key_hint: str) -> Any
     candidates.append(prop_id(key_hint, prop))
     candidates.append(prop_name(key_hint, prop))
     
-    # 标准化键名进行匹配
     normalized_props = {norm(k): v for k, v in props.items()}
     for key in candidates:
         if key in props:
             return props[key]
-        # 尝试标准化匹配
         normalized_key = norm(key)
         if normalized_key in normalized_props:
             return normalized_props[normalized_key]
@@ -449,7 +414,7 @@ def page_to_task(page: Dict[str, Any], schema: Dict[str, Any], fields: Dict[str,
         "created_time": page.get("created_time"),
         "last_edited_time": page.get("last_edited_time"),
     }
-    for k in ("title", "due", "priority", "status", "note", "category"):
+    for k in ("title", "due", "quadrant", "status", "note", "category"):
         prop = fields[k]
         key_hint = prop_name("", prop)
         raw = page_value(page, prop, key_hint)
@@ -473,44 +438,39 @@ def due_date_value(task: Dict[str, Any]) -> Optional[date]:
         return None
 
 
-def priority_score(task: Dict[str, Any], fields: Dict[str, Dict[str, Any]]) -> int:
-    pr = fields["priority"]
-    value = str(task.get("priority") or "")
-    opts = option_names(pr)
-    if not opts:
-        return 0
-    nv = norm(value)
-    for idx, opt in enumerate(opts):
-        no = norm(opt)
-        if no == nv:
-            if any(h in no for h in HIGH_PRIORITY_HINTS):
-                return 2
-            if any(h in no for h in LOW_PRIORITY_HINTS):
-                return 0
-            return 2 if idx < max(1, len(opts) // 2) else 0
-    for opt in opts:
-        no = norm(opt)
-        if any(h in no for h in HIGH_PRIORITY_HINTS):
-            return 2
-    return 1
+def quadrant_score(task: Dict[str, Any]) -> int:
+    quadrant = str(task.get("quadrant") or "").strip()
+    if quadrant == "重要紧急":
+        return 1
+    elif quadrant == "紧急不重要":
+        return 2
+    elif quadrant == "重要不紧急":
+        return 3
+    elif quadrant == "不重要不紧急":
+        return 4
+    return 4
 
 
-def urgent_score(task: Dict[str, Any], urgent_days: int = 2) -> int:
+def is_overdue(task: Dict[str, Any]) -> bool:
+    # 只对未完成的任务检查是否超时
+    if not page_matches_open(task):
+        return False
     due = due_date_value(task)
     if not due:
-        return 0
-    delta = (due - sg_today()).days
-    return 1 if delta <= urgent_days else 0
+        return False
+    return due < today()
 
 
-def sort_tasks(tasks: List[Dict[str, Any]], fields: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+def sort_tasks(tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted(
         tasks,
         key=lambda t: (
-            -priority_score(t, fields),
+            is_overdue(t),
+            quadrant_score(t),
             due_date_value(t) or date.max,
             t.get("created_time") or "",
         ),
+        reverse=(True, False, False, False),
     )
 
 
@@ -567,455 +527,392 @@ def build_date_filter(fields: Dict[str, Dict[str, Any]], start: date, end: date)
 
 def query_open_tasks_in_range(api_key: str, resolved: Dict[str, Any], fields: Dict[str, Dict[str, Any]], days: int) -> List[Dict[str, Any]]:
     ds_id = resolved["data_source_id"]
-    start = sg_today() - timedelta(days=days)
-    end = sg_today() + timedelta(days=days)
-    filter_obj = {"and": [build_date_filter(fields, start, end), build_status_filter(fields)]}
-    pages = query_data_source(api_key, ds_id, filter_obj)
-    tasks = [page_to_task(p, {}, fields) for p in pages]
+    start = today() - timedelta(days=days)
+    end = today() + timedelta(days=days)
+    
+    range_filter = {"and": [build_date_filter(fields, start, end), build_status_filter(fields)]}
+    
+    due_prop = fields["due"]
+    status_filter = build_status_filter(fields)
+    key = prop_name("", due_prop)
+    overdue_filter = {
+        "and": [
+            {"property": key, "date": {"before": today().isoformat()}},
+            status_filter["and"][0],
+            status_filter["and"][1],
+        ]
+    }
+    
+    range_pages = query_data_source(api_key, ds_id, range_filter)
+    overdue_pages = query_data_source(api_key, ds_id, overdue_filter)
+    
+    range_tasks = [page_to_task(p, {}, fields) for p in range_pages]
+    overdue_tasks = [page_to_task(p, {}, fields) for p in overdue_pages]
+    
+    for task in overdue_tasks:
+        task["overdue"] = True
+    
+    tasks = overdue_tasks + range_tasks
     tasks = [t for t in tasks if page_matches_open(t)]
-    return tasks
+    return sort_tasks(tasks)
 
 
 def query_today_tasks(api_key: str, resolved: Dict[str, Any], fields: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     ds_id = resolved["data_source_id"]
     due_prop = fields["due"]
-    status_filter = build_status_filter(fields)
     key = prop_name("", due_prop)
-    filter_obj = {
+    status_filter = build_status_filter(fields)
+    
+    today_filter = {
         "and": [
-            {"property": key, "date": {"equals": sg_today().isoformat()}},
+            {"property": key, "date": {"equals": today().isoformat()}},
             status_filter["and"][0],
             status_filter["and"][1],
         ]
     }
-    pages = query_data_source(api_key, ds_id, filter_obj)
-    tasks = [page_to_task(p, {}, fields) for p in pages]
-    tasks = [t for t in tasks if page_matches_open(t)]
-    return tasks
-
-
-def validate_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
-    return build_field_map(schema)
-
-
-def bootstrap(api_key: str, database_name: str) -> Dict[str, Any]:
-    resolved = resolve_database(api_key, database_name)
-    schema = retrieve_schema(api_key, resolved)
-    fields = validate_schema(schema)
-
-    cache = state_load()
-    cache["resolved"] = resolved
-    cache["fields"] = {
-        k: {
-            "key": prop_key_for_page(schema, v),
-            "id": prop_id("", v),
-            "name": prop_name("", v),
-            "type": prop_type(v),
-            "options": extract_options(v),
-        }
-        for k, v in fields.items()
-    }
-    state_save(cache)
-
-    return {
-        "resolved": resolved,
-        "fields": cache["fields"],
-    }
-
-
-def build_create_properties(
-    schema: Dict[str, Any],
-    fields: Dict[str, Dict[str, Any]],
-    text: str,
-    priority: Optional[str],
-    note: Optional[str],
-    category: Optional[str],
-    due_date: Optional[str] = None,
-    quadrant: Optional[str] = None,
-    status: Optional[str] = None,
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    # 由Agent处理解析，直接使用提供的参数
-    title = text
-    matched_date = ""
     
-    # 使用提供的due_date或解析text
-    if due_date:
-        try:
-            import iso8601
-            due = iso8601.parse_date(due_date)
-        except Exception:
-            raise SchemaError("无法解析提供的截止时间。")
-    else:
-        # 保持向后兼容，当没有提供due_date时解析text
-        due, matched_date, title = parse_date_text(text)
-        if not due:
-            raise SchemaError("无法从任务描述中识别截止时间。")
+    overdue_filter = {
+        "and": [
+            {"property": key, "date": {"before": today().isoformat()}},
+            status_filter["and"][0],
+            status_filter["and"][1],
+        ]
+    }
+    
+    today_pages = query_data_source(api_key, ds_id, today_filter)
+    overdue_pages = query_data_source(api_key, ds_id, overdue_filter)
+    
+    today_tasks = [page_to_task(p, {}, fields) for p in today_pages]
+    overdue_tasks = [page_to_task(p, {}, fields) for p in overdue_pages]
+    
+    for task in overdue_tasks:
+        task["overdue"] = True
+    
+    tasks = overdue_tasks + today_tasks
+    tasks = [t for t in tasks if page_matches_open(t)]
+    return sort_tasks(tasks)
 
+
+def create_task(api_key: str, resolved: Dict[str, Any], schema: Dict[str, Any], fields: Dict[str, Dict[str, Any]], task_data: Dict[str, Any]) -> Dict[str, Any]:
+    database_id = resolved["database_id"]
+    
     title_prop = fields["title"]
     due_prop = fields["due"]
-    pr_prop = fields["priority"]
-    st_prop = fields["status"]
+    quadrant_prop = fields["quadrant"]
+    status_prop = fields["status"]
     note_prop = fields["note"]
-    cat_prop = fields["category"]
-
-    chosen_priority, _ = priority_level(pr_prop, priority)
-    # 使用Agent提供的状态值，如果没有则使用默认值
-    chosen_status = status_value(st_prop, status if status else "todo")
-
-    props: Dict[str, Any] = {
-        prop_name("", title_prop): {"title": rich_text_payload(title)},
-        prop_name("", due_prop): {"date": {"start": due.isoformat()}},
-    }
-
-    if prop_type(pr_prop) in {"select", "status"}:
-        props[prop_name("", pr_prop)] = {prop_type(pr_prop): {"name": chosen_priority}}
-    elif prop_type(pr_prop) == "multi_select":
-        props[prop_name("", pr_prop)] = {"multi_select": [{"name": chosen_priority}]}
-
-    if prop_type(st_prop) == "status":
-        props[prop_name("", st_prop)] = {"status": {"name": chosen_status}}
+    category_prop = fields["category"]
+    
+    properties = {}
+    
+    title_key = prop_key_for_page(schema, title_prop)
+    properties[title_key] = {"title": rich_text_payload(task_data["title"])}
+    
+    due_key = prop_key_for_page(schema, due_prop)
+    properties[due_key] = {"date": {"start": task_data["due_date"]}}
+    
+    quadrant_key = prop_key_for_page(schema, quadrant_prop)
+    quadrant_value = choose_option(quadrant_prop, [task_data["quadrant"]], True)
+    quadrant_type = prop_type(quadrant_prop)
+    if quadrant_type == "multi_select":
+        properties[quadrant_key] = {"multi_select": [{"name": quadrant_value}]}
     else:
-        props[prop_name("", st_prop)] = {"select": {"name": chosen_status}}
-
-    if note:
-        if prop_type(note_prop) == "rich_text":
-            props[prop_name("", note_prop)] = {"rich_text": rich_text_payload(note)}
-        elif prop_type(note_prop) == "title":
-            props[prop_name("", note_prop)] = {"title": rich_text_payload(note)}
-
-    if category:
-        if prop_type(cat_prop) == "multi_select":
-            props[prop_name("", cat_prop)] = {"multi_select": [{"name": category}]}
-        elif prop_type(cat_prop) == "select":
-            props[prop_name("", cat_prop)] = {"select": {"name": category}}
-
-    # 处理四象限
-    if quadrant:
-        # 尝试找到四象限字段
-        quadrant_field = None
-        for name, field in schema.get("properties", {}).items():
-            if norm(name) in ["四象限", "quadrant"]:
-                quadrant_field = field
-                break
-        
-        if quadrant_field:
-            if prop_type(quadrant_field) in {"select", "status"}:
-                props[prop_name("", quadrant_field)] = {prop_type(quadrant_field): {"name": quadrant}}
-            elif prop_type(quadrant_field) == "multi_select":
-                props[prop_name("", quadrant_field)] = {"multi_select": [{"name": quadrant}]}
-
-    meta = {
-        "title": title,
-        "due_date": due.isoformat(),
-        "priority": chosen_priority,
-        "matched_date_text": matched_date,
+        properties[quadrant_key] = {quadrant_type: {"name": quadrant_value}}
+    
+    status_key = prop_key_for_page(schema, status_prop)
+    status_value = choose_option(status_prop, [task_data["status"]], True)
+    status_type = prop_type(status_prop)
+    properties[status_key] = {status_type: {"name": status_value}}
+    
+    if task_data.get("note"):
+        note_key = prop_key_for_page(schema, note_prop)
+        note_type = prop_type(note_prop)
+        if note_type == "rich_text":
+            properties[note_key] = {"rich_text": rich_text_payload(task_data["note"])}
+        else:
+            properties[note_key] = {"title": rich_text_payload(task_data["note"])}
+    
+    if task_data.get("category"):
+        category_key = prop_key_for_page(schema, category_prop)
+        category_type = prop_type(category_prop)
+        category_value = choose_option(category_prop, [task_data["category"]], True)
+        if category_type == "multi_select":
+            properties[category_key] = {"multi_select": [{"name": category_value}]}
+        else:
+            properties[category_key] = {category_type: {"name": category_value}}
+    
+    body = {
+        "parent": {"database_id": database_id},
+        "properties": properties,
     }
     
-    if quadrant:
-        meta["quadrant"] = quadrant
-        
-    return props, meta
-
-
-def create_task(
-    api_key: str,
-    database_name: str,
-    text: str,
-    priority: Optional[str] = None,
-    note: Optional[str] = None,
-    category: Optional[str] = None,
-    due_date: Optional[str] = None,
-    quadrant: Optional[str] = None,
-    status: Optional[str] = None,
-) -> Dict[str, Any]:
-    resolved = resolve_database(api_key, database_name)
-    schema = retrieve_schema(api_key, resolved)
-    fields = validate_schema(schema)
-
-    props, meta = build_create_properties(schema, fields, text, priority, note, category, due_date, quadrant, status)
-    page = notion_request(
-        api_key,
-        "POST",
-        "/pages",
-        body={
-            "parent": {"type": "data_source_id", "data_source_id": resolved["data_source_id"]},
-            "properties": props,
-        },
-    )
-    task = {
-        "page_id": page.get("id"),
-        "url": page.get("url"),
-        **meta,
-    }
-
+    result = notion_request(api_key, "POST", "/pages", body=body)
+    
     cache = state_load()
-    cache["resolved"] = resolved
-    cache["fields"] = cache.get("fields") or {}
-    cache["last_task"] = task
+    cache["last_task"] = {"page_id": result["id"], "title": task_data["title"]}
     state_save(cache)
-
-    return task
-
-
-def fetch_tasks(api_key: str, database_name: str, mode: str, days: int = 7) -> Dict[str, Any]:
-    resolved = resolve_database(api_key, database_name)
-    schema = retrieve_schema(api_key, resolved)
-    fields = validate_schema(schema)
-
-    if mode == "today":
-        tasks = query_today_tasks(api_key, resolved, fields)
-    else:
-        tasks = query_open_tasks_in_range(api_key, resolved, fields, days)
-
-    tasks = sort_tasks(tasks, fields)
-
-    cache = state_load()
-    cache["resolved"] = resolved
-    cache["fields"] = cache.get("fields") or {}
-    if tasks:
-        cache["last_task"] = tasks[0]
-    state_save(cache)
-
-    return {
-        "resolved": resolved,
-        "count": len(tasks),
-        "tasks": tasks,
-    }
+    
+    return page_to_task(result, schema, fields)
 
 
-def get_last_task_page_id() -> Optional[str]:
-    cache = state_load()
-    last = cache.get("last_task") or {}
-    return last.get("page_id")
-
-
-def update_task_status(
-    api_key: str,
-    database_name: str,
-    status_kind: str,
-    page_id: Optional[str] = None,
-    fallback_query_text: Optional[str] = None,
-) -> Dict[str, Any]:
-    resolved = resolve_database(api_key, database_name)
-    schema = retrieve_schema(api_key, resolved)
-    fields = validate_schema(schema)
-
-    if not page_id:
-        page_id = get_last_task_page_id()
-    if not page_id and fallback_query_text:
-        recent = fetch_tasks(api_key, database_name, "recent", 30)["tasks"]
-        for task in recent:
-            if norm(fallback_query_text) in norm(task.get("title")):
-                page_id = task["page_id"]
-                break
-    if not page_id:
-        raise NotionQMError("未能定位要更新的任务，请先查询或明确指定任务。")
-
+def update_task_status(api_key: str, resolved: Dict[str, Any], schema: Dict[str, Any], fields: Dict[str, Dict[str, Any]], page_id: str, status_kind: str) -> Dict[str, Any]:
     status_prop = fields["status"]
-    status_name = status_value(status_prop, "done" if status_kind == "done" else "cancel")
-    prop = prop_name("", status_prop)
+    status_key = prop_key_for_page(schema, status_prop)
+    status_type = prop_type(status_prop)
+    status_value = status_value(status_prop, status_kind)
+    
     body = {
         "properties": {
-            prop: {
-                "status" if prop_type(status_prop) == "status" else "select": {"name": status_name}
-            }
-        }
+            status_key: {status_type: {"name": status_value}},
+        },
     }
-    page = notion_request(api_key, "PATCH", f"/pages/{page_id}", body=body)
+    
+    result = notion_request(api_key, "PATCH", f"/pages/{page_id}", body=body)
+    return page_to_task(result, schema, fields)
 
-    cache = state_load()
-    last = cache.get("last_task") or {}
-    if last.get("page_id") == page_id:
-        last["status"] = status_name
-        cache["last_task"] = last
-    state_save(cache)
 
-    return {
-        "page_id": page_id,
-        "status": status_name,
-        "url": page.get("url"),
+def find_task_by_text(api_key: str, resolved: Dict[str, Any], schema: Dict[str, Any], fields: Dict[str, Dict[str, Any]], text: str) -> Optional[Dict[str, Any]]:
+    ds_id = resolved["data_source_id"]
+    status_filter = build_status_filter(fields)
+    pages = query_data_source(api_key, ds_id, status_filter)
+    
+    for page in pages:
+        task = page_to_task(page, schema, fields)
+        title = str(task.get("title") or "")
+        if norm(text) in norm(title) or norm(title) in norm(text):
+            return task
+    return None
+
+
+def generate_summary(tasks: List[Dict[str, Any]], days: int) -> Dict[str, Any]:
+    quadrant_counts = {
+        "重要紧急": 0,
+        "紧急不重要": 0,
+        "重要不紧急": 0,
+        "不重要不紧急": 0,
     }
-
-
-def quadrant_of(task: Dict[str, Any], fields: Dict[str, Dict[str, Any]], urgent_days: int = 2) -> str:
-    important = priority_score(task, fields) == 2
-    urgent = urgent_score(task, urgent_days=urgent_days) == 1
-    if important and urgent:
-        return "重要紧急"
-    if important and not urgent:
-        return "重要不紧急"
-    if not important and urgent:
-        return "紧急不重要"
-    return "不重要不紧急"
-
-
-def summarize_recent(api_key: str, database_name: str, days: int = 7) -> Dict[str, Any]:
-    fetched = fetch_tasks(api_key, database_name, "recent", days)
-    resolved = fetched["resolved"]
-    schema = retrieve_schema(api_key, resolved)
-    fields = validate_schema(schema)
-    tasks = fetched["tasks"]
-
-    counts = {"重要紧急": 0, "重要不紧急": 0, "紧急不重要": 0, "不重要不紧急": 0}
-    important_urgent: List[Dict[str, Any]] = []
-    urgent_unimportant: List[Dict[str, Any]] = []
-
+    
+    important_urgent_tasks = []
+    overdue_tasks = []
+    
     for task in tasks:
-        q = quadrant_of(task, fields)
-        counts[q] += 1
-        if q == "重要紧急":
-            important_urgent.append(task)
-        elif q == "紧急不重要":
-            urgent_unimportant.append(task)
-
-    advice = ""
-    if tasks:
-        first = tasks[0]
-        advice = one_sentence_advice(str(first.get("title") or ""))
-
+        quadrant = str(task.get("quadrant") or "不重要不紧急")
+        if quadrant in quadrant_counts:
+            quadrant_counts[quadrant] += 1
+        else:
+            quadrant_counts["不重要不紧急"] += 1
+        
+        if quadrant == "重要紧急":
+            important_urgent_tasks.append(task)
+        
+        if task.get("overdue"):
+            overdue_tasks.append(task)
+    
+    total_tasks = sum(quadrant_counts.values())
+    
     return {
-        "resolved": resolved,
         "days": days,
-        "counts": counts,
-        "important_urgent": important_urgent,
-        "urgent_unimportant": urgent_unimportant,
-        "first_task_advice": advice,
+        "total_tasks": total_tasks,
+        "quadrant_counts": quadrant_counts,
+        "important_urgent_tasks": important_urgent_tasks,
+        "overdue_tasks": overdue_tasks,
     }
 
 
-def one_sentence_advice(title: str) -> str:
-    t = norm(title)
-    if any(k in t for k in ["会议", "开会", "沟通", "电话"]):
-        return "先确认时间、参会人和议题，再把要说的内容压成三点。"
-    if any(k in t for k in ["报告", "文档", "方案", "总结", "邮件"]):
-        return "先列出大纲和结论，再补材料，最后统一润色。"
-    if any(k in t for k in ["购买", "下单", "预订", "订", "买"]):
-        return "先锁定供应和时间，再确认预算与收货/出行细节。"
-    if any(k in t for k in ["整理", "归档", "清理", "搬运"]):
-        return "先把任务拆成收集、分类、执行三步，先做最容易开头的一步。"
-    return "先把这件事拆成一个能在15分钟内完成的最小下一步。"
+def handle_bootstrap(args: Dict[str, Any]) -> None:
+    api_key = args["notion_api_key"]
+    database_name = args["database_name"]
+    
+    resolved = resolve_database(api_key, database_name)
+    schema = retrieve_schema(api_key, resolved)
+    fields = build_field_map(schema)
+    
+    json_output(True, "bootstrap", "数据库连接成功", {
+        "resolved": resolved,
+        "fields": fields,
+    })
 
 
-def print_tasks_result(result: Dict[str, Any], mode: str) -> None:
-    tasks = result["tasks"]
-    if not tasks:
-        json_output(True, mode, "没有找到符合条件的未完成任务。", result)
-        return
-    if mode == "today":
-        msg = f"找到 {len(tasks)} 条今天未完成任务。"
-    else:
-        msg = f"找到 {len(tasks)} 条近 {result.get('days', '')} 天内的未完成任务。"
-    json_output(True, mode, msg, result)
+def handle_add(args: Dict[str, Any]) -> None:
+    api_key = args["notion_api_key"]
+    database_name = args["database_name"]
+    title = args["title"]
+    due_date = args["due_date"]
+    quadrant = args["quadrant"]
+    status = args.get("status", "未开始")
+    category = args.get("category")
+    note = args.get("note")
+    
+    resolved = resolve_database(api_key, database_name)
+    schema = retrieve_schema(api_key, resolved)
+    fields = build_field_map(schema)
+    
+    task_data = {
+        "title": title,
+        "due_date": due_date,
+        "quadrant": quadrant,
+        "status": status,
+        "category": category,
+        "note": note,
+    }
+    
+    task = create_task(api_key, resolved, schema, fields, task_data)
+    
+    json_output(True, "add", "任务创建成功", {"task": task})
 
+
+def handle_today(args: Dict[str, Any]) -> None:
+    api_key = args["notion_api_key"]
+    database_name = args["database_name"]
+    
+    resolved = resolve_database(api_key, database_name)
+    schema = retrieve_schema(api_key, resolved)
+    fields = build_field_map(schema)
+    
+    tasks = query_today_tasks(api_key, resolved, fields)
+    
+    json_output(True, "today", f"今天有 {len(tasks)} 个未完成任务", {"tasks": tasks})
+
+
+def handle_recent(args: Dict[str, Any]) -> None:
+    api_key = args["notion_api_key"]
+    database_name = args["database_name"]
+    days = args.get("days", 7)
+    
+    resolved = resolve_database(api_key, database_name)
+    schema = retrieve_schema(api_key, resolved)
+    fields = build_field_map(schema)
+    
+    tasks = query_open_tasks_in_range(api_key, resolved, fields, days)
+    
+    json_output(True, "recent", f"最近 {days} 天有 {len(tasks)} 个未完成任务", {"tasks": tasks})
+
+
+def handle_complete(args: Dict[str, Any]) -> None:
+    api_key = args["notion_api_key"]
+    database_name = args["database_name"]
+    page_id = args.get("page_id")
+    text = args.get("text")
+    
+    resolved = resolve_database(api_key, database_name)
+    schema = retrieve_schema(api_key, resolved)
+    fields = build_field_map(schema)
+    
+    if not page_id:
+        cache = state_load()
+        last_task = cache.get("last_task")
+        if last_task:
+            page_id = last_task.get("page_id")
+        elif text:
+            task = find_task_by_text(api_key, resolved, schema, fields, text)
+            if task:
+                page_id = task["page_id"]
+    
+    if not page_id:
+        raise ConfigError("未找到任务，请提供任务 ID 或描述")
+    
+    task = update_task_status(api_key, resolved, schema, fields, page_id, "done")
+    
+    json_output(True, "complete", "任务已标记为已完成", {"task": task})
+
+
+def handle_cancel(args: Dict[str, Any]) -> None:
+    api_key = args["notion_api_key"]
+    database_name = args["database_name"]
+    page_id = args.get("page_id")
+    text = args.get("text")
+    
+    resolved = resolve_database(api_key, database_name)
+    schema = retrieve_schema(api_key, resolved)
+    fields = build_field_map(schema)
+    
+    if not page_id:
+        cache = state_load()
+        last_task = cache.get("last_task")
+        if last_task:
+            page_id = last_task.get("page_id")
+        elif text:
+            task = find_task_by_text(api_key, resolved, schema, fields, text)
+            if task:
+                page_id = task["page_id"]
+    
+    if not page_id:
+        raise ConfigError("未找到任务，请提供任务 ID 或描述")
+    
+    task = update_task_status(api_key, resolved, schema, fields, page_id, "cancel")
+    
+    json_output(True, "cancel", "任务已标记为已取消", {"task": task})
+
+
+def handle_summary(args: Dict[str, Any]) -> None:
+    api_key = args["notion_api_key"]
+    database_name = args["database_name"]
+    days = args.get("days", 7)
+    
+    resolved = resolve_database(api_key, database_name)
+    schema = retrieve_schema(api_key, resolved)
+    fields = build_field_map(schema)
+    
+    tasks = query_open_tasks_in_range(api_key, resolved, fields, days)
+    summary = generate_summary(tasks, days)
+    
+    json_output(True, "summary", f"最近 {days} 天任务总结", {"summary": summary})
+
+
+def get_api_key() -> str:
+    """从 ~/.config/notion/api_key 文件读取 API 密钥"""
+    api_key_path = Path.home() / ".config" / "notion" / "api_key"
+    try:
+        if not api_key_path.exists():
+            raise ConfigError(f"API 密钥文件不存在：{api_key_path}")
+        api_key = api_key_path.read_text(encoding="utf-8").strip()
+        if not api_key:
+            raise ConfigError("API 密钥文件为空")
+        return api_key
+    except Exception as e:
+        raise ConfigError(f"读取 API 密钥失败：{e}") from e
 
 def main() -> None:
-    # 尝试多种参数解析方式，适应不同的命令构建方式
     if len(sys.argv) < 3:
-        # 尝试从环境变量获取参数
-        api_key = os.getenv("NOTION_API_KEY") or os.getenv("notion_api_key")
-        database_name = os.getenv("NOTION_DATABASE_NAME") or os.getenv("notion_database_name")
-        action = os.getenv("NOTION_ACTION") or "bootstrap"
-        
-        if not api_key or not database_name:
-            json_output(False, "unknown", "参数不足。请提供 API 密钥和数据库名称。")
-            sys.exit(1)
-    else:
-        # 标准命令行参数
-        action = sys.argv[1]
-        
-        # 尝试解析JSON参数，处理可能的反斜杠和引号问题
-        try:
-            # 尝试直接解析
-            args = json.loads(sys.argv[2])
-        except Exception:
-            # 尝试处理可能的转义问题
-            try:
-                # 移除可能的多余引号
-                json_str = sys.argv[2].strip('"\'')
-                args = json.loads(json_str)
-            except Exception as exc:
-                json_output(False, action, f"参数 JSON 解析失败：{exc}")
-                sys.exit(1)
-        
-        api_key = args.get("notion_api_key") or args.get("api_key") or os.getenv("NOTION_API_KEY") or os.getenv("notion_api_key")
-        database_name = args.get("database_name") or args.get("notion_database_name") or os.getenv("NOTION_DATABASE_NAME") or os.getenv("notion_database_name")
-        if not api_key:
-            json_output(False, action, "缺少 notion_api_key / api_key。")
-            sys.exit(1)
-        if not database_name:
-            json_output(False, action, "缺少 notion_database_name / database_name。")
-            sys.exit(1)
-
-    # 打印调试信息（可选）
-    # print(f"Action: {action}")
-    # print(f"API Key: {api_key[:10]}...")
-    # print(f"Database Name: {database_name}")
-
-    try:
-        if action in {"bootstrap", "inspect_schema"}:
-            result = bootstrap(api_key, database_name)
-            json_output(True, action, "数据库连接与字段识别成功。", result)
-            return
-
-        if action == "add":
-            # 由Agent处理解析，直接接受解析后的参数
-            title = args.get("title") or args.get("text") or ""
-            if not title:
-                raise ConfigError("add 动作缺少 title。")
-            
-            task = create_task(
-                api_key=api_key,
-                database_name=database_name,
-                text=title,  # 保持向后兼容，使用title作为text
-                priority=args.get("priority"),
-                note=args.get("note"),
-                category=args.get("category"),
-                due_date=args.get("due_date"),
-                quadrant=args.get("quadrant"),
-                status=args.get("status")  # 处理由Agent提供的状态
-            )
-            json_output(True, action, "任务创建成功。", task)
-            return
-
-        if action == "today":
-            result = fetch_tasks(api_key, database_name, "today", 0)
-            print_tasks_result(result, "today")
-            return
-
-        if action == "recent":
-            days = int(args.get("days", 7))
-            result = fetch_tasks(api_key, database_name, "recent", days)
-            result["days"] = days
-            print_tasks_result(result, "recent")
-            return
-
-        if action == "complete":
-            page_id = args.get("page_id")
-            fallback = args.get("text") or args.get("query_text")
-            result = update_task_status(api_key, database_name, "done", page_id=page_id, fallback_query_text=fallback)
-            json_output(True, action, "任务已标记为已完成。", result)
-            return
-
-        if action == "cancel":
-            page_id = args.get("page_id")
-            fallback = args.get("text") or args.get("query_text")
-            result = update_task_status(api_key, database_name, "cancel", page_id=page_id, fallback_query_text=fallback)
-            json_output(True, action, "任务已标记为已取消。", result)
-            return
-
-        if action == "summary":
-            days = int(args.get("days", 7))
-            result = summarize_recent(api_key, database_name, days)
-            json_output(True, action, "最近任务总结完成。", result)
-            return
-
-        raise ConfigError(f"未知 action：{action}")
-
-    except NotionQMError as exc:
-        json_output(False, action, str(exc))
+        json_output(False, "error", "用法: python3 notion_quadrant_manager.py <action> '<json_args>'", {})
         sys.exit(1)
-    except Exception as exc:
-        json_output(False, action, f"未预期错误：{exc}")
+    
+    action = sys.argv[1]
+    
+    try:
+        args = json.loads(sys.argv[2])
+    except json.JSONDecodeError as e:
+        json_output(False, action, f"JSON 解析失败：{e}", {})
+        sys.exit(1)
+    
+    try:
+        # 从配置文件读取 API 密钥
+        api_key = get_api_key()
+        # 将 API 密钥添加到 args 中
+        args["notion_api_key"] = api_key
+        
+        if action == "bootstrap":
+            handle_bootstrap(args)
+        elif action == "add":
+            handle_add(args)
+        elif action == "today":
+            handle_today(args)
+        elif action == "recent":
+            handle_recent(args)
+        elif action == "complete":
+            handle_complete(args)
+        elif action == "cancel":
+            handle_cancel(args)
+        elif action == "summary":
+            handle_summary(args)
+        else:
+            json_output(False, action, f"未知的动作：{action}", {})
+            sys.exit(1)
+    except NotionQMError as e:
+        json_output(False, action, str(e), {})
+        sys.exit(1)
+    except Exception as e:
+        json_output(False, action, f"未知错误：{e}", {})
         sys.exit(1)
 
 
