@@ -34,7 +34,7 @@ metadata:
 
 ## 3. 必要字段
 
-脚本会自动识别数据库中与下列语义对应的字段：
+Agent会自动识别数据库中与下列语义对应的字段：
 
 - 待办事项
 - 截止时间
@@ -76,12 +76,12 @@ python3 notion_quadrant_manager.py bootstrap '{"notion_api_key":"xxx","database_
 ```
 
 ### 5.2 add
-创建任务。脚本会从 `text` 中自动解析日期和任务内容。
+创建任务。由Agent识别对话中的日期、事项、优先级、分类、备注（如有）、状态（默认未开始，如果用户表明正在做，则对应进行中），生成结构化数据输出给脚本执行。
 
 示例：
 
 ```bash
-python3 notion_quadrant_manager.py add '{"notion_api_key":"xxx","database_name":"xxx","text":"3月28号去北京","priority":"中"}'
+python3 notion_quadrant_manager.py add '{"notion_api_key":"xxx","database_name":"xxx","title":"去北京","due_date":"2026-03-28","priority":"中","status":"未开始","category":"工作","note":"商务出差"}'
 ```
 
 ### 5.3 today
@@ -190,6 +190,9 @@ python3 notion_quadrant_manager.py summary '{"notion_api_key":"xxx","database_na
 - `recent`，并传入 `days=3`
 
 ## 7. 四象限判定
+
+- **写入数据**：直接询问用户任务的四象限分类
+- **总结分析**：根据数据库中的优先级和截止日期字段值判定四象限
 
 按以下规则判断四象限：
 

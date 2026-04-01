@@ -19,7 +19,7 @@ SG_TZ = ZoneInfo("Asia/Singapore")
 STATE_PATH = Path(
     os.getenv(
         "OPENCLAW_NOTION_QM_STATE",
-        str(Path.home() / ".openclaw" / "notion_quadrant_manager_state.json"),
+        str(Path(".") / "notion_quadrant_manager_state.json"),
     )
 )
 
@@ -32,7 +32,7 @@ TODO_STATUS_HINTS = ("未完成", "待办", "todo", "to do", "not started", "进
 FIELD_ALIASES = {
     "title": ["待办事项", "待办", "标题", "task", "name", "title", "事项", "任务"],
     "due": ["截止时间", "截止日期", "due date", "due", "deadline", "日期", "时间", "到期"],
-    "priority": ["优先级", "priority", "重要程度", "等级"],
+    "priority": ["优先级", "priority", "重要程度", "等级","四象限"],
     "status": ["状态", "status", "进度"],
     "note": ["备注", "note", "备注说明", "说明", "描述", "details", "detail"],
     "category": ["分类", "category", "tag", "tags", "类别", "分组"],
@@ -394,9 +394,17 @@ def page_value(page: Dict[str, Any], prop: Dict[str, Any], key_hint: str) -> Any
         candidates.append(key_hint)
     candidates.append(prop_id(key_hint, prop))
     candidates.append(prop_name(key_hint, prop))
+    
+    # 标准化键名进行匹配
+    normalized_props = {norm(k): v for k, v in props.items()}
     for key in candidates:
         if key in props:
             return props[key]
+        # 尝试标准化匹配
+        normalized_key = norm(key)
+        if normalized_key in normalized_props:
+            return normalized_props[normalized_key]
+    
     target_id = prop_id(key_hint, prop)
     target_name = norm(prop_name(key_hint, prop))
     for k, v in props.items():
@@ -622,10 +630,26 @@ def build_create_properties(
     priority: Optional[str],
     note: Optional[str],
     category: Optional[str],
+    due_date: Optional[str] = None,
+    quadrant: Optional[str] = None,
+    status: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    due, matched_date, title = parse_date_text(text)
-    if not due:
-        raise SchemaError("无法从任务描述中识别截止时间。")
+    # 由Agent处理解析，直接使用提供的参数
+    title = text
+    matched_date = ""
+    
+    # 使用提供的due_date或解析text
+    if due_date:
+        try:
+            import iso8601
+            due = iso8601.parse_date(due_date)
+        except Exception:
+            raise SchemaError("无法解析提供的截止时间。")
+    else:
+        # 保持向后兼容，当没有提供due_date时解析text
+        due, matched_date, title = parse_date_text(text)
+        if not due:
+            raise SchemaError("无法从任务描述中识别截止时间。")
 
     title_prop = fields["title"]
     due_prop = fields["due"]
@@ -635,7 +659,8 @@ def build_create_properties(
     cat_prop = fields["category"]
 
     chosen_priority, _ = priority_level(pr_prop, priority)
-    chosen_status = status_value(st_prop, "todo")
+    # 使用Agent提供的状态值，如果没有则使用默认值
+    chosen_status = status_value(st_prop, status if status else "todo")
 
     props: Dict[str, Any] = {
         prop_name("", title_prop): {"title": rich_text_payload(title)},
@@ -664,12 +689,31 @@ def build_create_properties(
         elif prop_type(cat_prop) == "select":
             props[prop_name("", cat_prop)] = {"select": {"name": category}}
 
+    # 处理四象限
+    if quadrant:
+        # 尝试找到四象限字段
+        quadrant_field = None
+        for name, field in schema.get("properties", {}).items():
+            if norm(name) in ["四象限", "quadrant"]:
+                quadrant_field = field
+                break
+        
+        if quadrant_field:
+            if prop_type(quadrant_field) in {"select", "status"}:
+                props[prop_name("", quadrant_field)] = {prop_type(quadrant_field): {"name": quadrant}}
+            elif prop_type(quadrant_field) == "multi_select":
+                props[prop_name("", quadrant_field)] = {"multi_select": [{"name": quadrant}]}
+
     meta = {
         "title": title,
         "due_date": due.isoformat(),
         "priority": chosen_priority,
         "matched_date_text": matched_date,
     }
+    
+    if quadrant:
+        meta["quadrant"] = quadrant
+        
     return props, meta
 
 
@@ -680,12 +724,15 @@ def create_task(
     priority: Optional[str] = None,
     note: Optional[str] = None,
     category: Optional[str] = None,
+    due_date: Optional[str] = None,
+    quadrant: Optional[str] = None,
+    status: Optional[str] = None,
 ) -> Dict[str, Any]:
     resolved = resolve_database(api_key, database_name)
     schema = retrieve_schema(api_key, resolved)
     fields = validate_schema(schema)
 
-    props, meta = build_create_properties(schema, fields, text, priority, note, category)
+    props, meta = build_create_properties(schema, fields, text, priority, note, category, due_date, quadrant, status)
     page = notion_request(
         api_key,
         "POST",
@@ -716,12 +763,10 @@ def fetch_tasks(api_key: str, database_name: str, mode: str, days: int = 7) -> D
     fields = validate_schema(schema)
 
     if mode == "today":
-        pages = query_today_tasks(api_key, resolved, fields)
+        tasks = query_today_tasks(api_key, resolved, fields)
     else:
-        pages = query_open_tasks_in_range(api_key, resolved, fields, days)
+        tasks = query_open_tasks_in_range(api_key, resolved, fields, days)
 
-    tasks = [page_to_task(p, schema, fields) for p in pages]
-    tasks = [t for t in tasks if page_matches_open(t)]
     tasks = sort_tasks(tasks, fields)
 
     cache = state_load()
@@ -793,7 +838,7 @@ def update_task_status(
 
 
 def quadrant_of(task: Dict[str, Any], fields: Dict[str, Dict[str, Any]], urgent_days: int = 2) -> str:
-    important = priority_score(task, fields) >= 1
+    important = priority_score(task, fields) == 2
     urgent = urgent_score(task, urgent_days=urgent_days) == 1
     if important and urgent:
         return "重要紧急"
@@ -864,25 +909,47 @@ def print_tasks_result(result: Dict[str, Any], mode: str) -> None:
 
 
 def main() -> None:
+    # 尝试多种参数解析方式，适应不同的命令构建方式
     if len(sys.argv) < 3:
-        json_output(False, "unknown", "参数不足。用法：python notion_quadrant_manager.py <action> '<json>'")
-        sys.exit(1)
+        # 尝试从环境变量获取参数
+        api_key = os.getenv("NOTION_API_KEY") or os.getenv("notion_api_key")
+        database_name = os.getenv("NOTION_DATABASE_NAME") or os.getenv("notion_database_name")
+        action = os.getenv("NOTION_ACTION") or "bootstrap"
+        
+        if not api_key or not database_name:
+            json_output(False, "unknown", "参数不足。请提供 API 密钥和数据库名称。")
+            sys.exit(1)
+    else:
+        # 标准命令行参数
+        action = sys.argv[1]
+        
+        # 尝试解析JSON参数，处理可能的反斜杠和引号问题
+        try:
+            # 尝试直接解析
+            args = json.loads(sys.argv[2])
+        except Exception:
+            # 尝试处理可能的转义问题
+            try:
+                # 移除可能的多余引号
+                json_str = sys.argv[2].strip('"\'')
+                args = json.loads(json_str)
+            except Exception as exc:
+                json_output(False, action, f"参数 JSON 解析失败：{exc}")
+                sys.exit(1)
+        
+        api_key = args.get("notion_api_key") or args.get("api_key") or os.getenv("NOTION_API_KEY") or os.getenv("notion_api_key")
+        database_name = args.get("database_name") or args.get("notion_database_name") or os.getenv("NOTION_DATABASE_NAME") or os.getenv("notion_database_name")
+        if not api_key:
+            json_output(False, action, "缺少 notion_api_key / api_key。")
+            sys.exit(1)
+        if not database_name:
+            json_output(False, action, "缺少 notion_database_name / database_name。")
+            sys.exit(1)
 
-    action = sys.argv[1]
-    try:
-        args = json.loads(sys.argv[2])
-    except Exception as exc:
-        json_output(False, action, f"参数 JSON 解析失败：{exc}")
-        sys.exit(1)
-
-    api_key = args.get("notion_api_key") or args.get("api_key")
-    database_name = args.get("database_name") or args.get("notion_database_name")
-    if not api_key:
-        json_output(False, action, "缺少 notion_api_key / api_key。")
-        sys.exit(1)
-    if not database_name:
-        json_output(False, action, "缺少 notion_database_name / database_name。")
-        sys.exit(1)
+    # 打印调试信息（可选）
+    # print(f"Action: {action}")
+    # print(f"API Key: {api_key[:10]}...")
+    # print(f"Database Name: {database_name}")
 
     try:
         if action in {"bootstrap", "inspect_schema"}:
@@ -891,16 +958,21 @@ def main() -> None:
             return
 
         if action == "add":
-            text = args.get("text") or args.get("task_text") or ""
-            if not text:
-                raise ConfigError("add 动作缺少 text。")
+            # 由Agent处理解析，直接接受解析后的参数
+            title = args.get("title") or args.get("text") or ""
+            if not title:
+                raise ConfigError("add 动作缺少 title。")
+            
             task = create_task(
                 api_key=api_key,
                 database_name=database_name,
-                text=text,
+                text=title,  # 保持向后兼容，使用title作为text
                 priority=args.get("priority"),
                 note=args.get("note"),
                 category=args.get("category"),
+                due_date=args.get("due_date"),
+                quadrant=args.get("quadrant"),
+                status=args.get("status")  # 处理由Agent提供的状态
             )
             json_output(True, action, "任务创建成功。", task)
             return
