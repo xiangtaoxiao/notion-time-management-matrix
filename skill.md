@@ -1,5 +1,5 @@
 ---
-name: Notion_Time_Management_Matrix
+name: notion-time-management-matrix
 description:
   基于 Notion 的数据库帮助用户基于四象限法则进行时间管理。用于通过 exec 调用 Python 脚本完成指定notion数据库的连接、待办事项创建、查询、更新与分析总结。当用户提出"明天要做"或"最近有什么重要的事"或"25号前解决"等涉及时间管理内容时触发。
 metadata:

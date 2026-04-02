@@ -662,11 +662,11 @@ def update_task_status(api_key: str, resolved: Dict[str, Any], schema: Dict[str,
     status_prop = fields["status"]
     status_key = prop_key_for_page(schema, status_prop)
     status_type = prop_type(status_prop)
-    status_value = status_value(status_prop, status_kind)
+    status_val = status_value(status_prop, status_kind)
     
     body = {
         "properties": {
-            status_key: {status_type: {"name": status_value}},
+            status_key: {status_type: {"name": status_val}},
         },
     }
     
