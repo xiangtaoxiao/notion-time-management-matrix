@@ -159,9 +159,7 @@ python3 ./scripts/notion_quadrant_manager.py search '{"database_name":"xxx","que
 python3 ./scripts/notion_quadrant_manager.py update_status '{"database_name":"xxx","page_id":"任务ID","status":"进行中"}'
 ```
 
-
-
-### 5.7 summary
+### 5.6 summary
 按四象限统计待办任务数量，总结最近任务。
 
 **参数**：
