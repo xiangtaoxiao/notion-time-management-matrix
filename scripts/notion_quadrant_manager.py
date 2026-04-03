@@ -1,7 +1,9 @@
+#!/usr/bin/env python3
 import json
 import os
 import re
 import sys
+import traceback
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -280,22 +282,28 @@ def extract_options(prop: Dict[str, Any]) -> List[str]:
 
 
 def find_property(schema: Dict[str, Any], wanted: str, required_types: List[str]) -> Dict[str, Any]:
-    wanted_aliases = [norm(x) for x in FIELD_ALIASES[wanted]]
-    matched: List[Tuple[int, str, Dict[str, Any]]] = []
-    for key, prop in prop_items(schema):
-        name = prop_name(key, prop)
-        n = norm(name)
-        if prop_type(prop) in set(required_types) and any(alias == n or alias in n or n in alias for alias in wanted_aliases):
-            score = 100 if any(alias == n for alias in wanted_aliases) else 50
-            matched.append((score, name, prop))
-    if not matched:
-        if wanted == "title":
-            for key, prop in prop_items(schema):
-                if prop_type(prop) == "title":
-                    return prop
-        raise SchemaError(f"缺少必要字段：{wanted}")
-    matched.sort(key=lambda x: x[0], reverse=True)
-    return matched[0][2]
+    try:
+        wanted_aliases = [norm(x) for x in FIELD_ALIASES.get(wanted, [])]
+        matched: List[Tuple[int, str, Dict[str, Any]]] = []
+        for key, prop in prop_items(schema):
+            name = prop_name(key, prop)
+            n = norm(name)
+            if prop_type(prop) in set(required_types) and any(alias == n or alias in n or n in alias for alias in wanted_aliases):
+                score = 100 if any(alias == n for alias in wanted_aliases) else 50
+                matched.append((score, name, prop))
+        if not matched:
+            if wanted == "title":
+                for key, prop in prop_items(schema):
+                    if prop_type(prop) == "title":
+                        return prop
+            raise SchemaError(f"缺少必要字段：{wanted}")
+        matched.sort(key=lambda x: x[0], reverse=True)
+        if matched and len(matched[0]) >= 3:
+            return matched[0][2]
+        else:
+            raise SchemaError(f"字段匹配结果格式错误：{wanted}")
+    except Exception as e:
+        raise SchemaError(f"查找字段时出错：{e}") from e
 
 
 def build_field_map(schema: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -965,50 +973,56 @@ def get_api_key() -> str:
         raise ConfigError(f"读取 API 密钥失败：{e}") from e
 
 def main() -> None:
-    if len(sys.argv) < 3:
-        json_output(False, "error", "用法: python3 notion_quadrant_manager.py <action> '<json_args>'", {})
-        sys.exit(1)
-    
-    action = sys.argv[1]
-    
     try:
-        args = json.loads(sys.argv[2])
-    except json.JSONDecodeError as e:
-        json_output(False, action, f"JSON 解析失败：{e}", {})
-        sys.exit(1)
-    
-    try:
-        # 从配置文件读取 API 密钥
-        api_key = get_api_key()
-        # 将 API 密钥添加到 args 中
-        args["notion_api_key"] = api_key
-        
-        if action == "bootstrap":
-            handle_bootstrap(args)
-        elif action == "add":
-            handle_add(args)
-        elif action == "today":
-            handle_today(args)
-        elif action == "query":
-            handle_query(args)
-        elif action == "recent":
-            handle_recent(args)
-        elif action == "search":
-            handle_search(args)
-        elif action == "complete":
-            handle_complete(args)
-        elif action == "cancel":
-            handle_cancel(args)
-        elif action == "summary":
-            handle_summary(args)
-        else:
-            json_output(False, action, f"未知的动作：{action}", {})
+        if len(sys.argv) < 3:
+            json_output(False, "error", "用法: python3 notion_quadrant_manager.py <action> '<json_args>'", {})
             sys.exit(1)
-    except NotionQMError as e:
-        json_output(False, action, str(e), {})
-        sys.exit(1)
+        
+        action = sys.argv[1]
+        
+        try:
+            args = json.loads(sys.argv[2])
+        except json.JSONDecodeError as e:
+            json_output(False, action, f"JSON 解析失败：{e}", {})
+            sys.exit(1)
+        
+        try:
+            # 从配置文件读取 API 密钥
+            api_key = get_api_key()
+            # 将 API 密钥添加到 args 中
+            args["notion_api_key"] = api_key
+            
+            if action == "bootstrap":
+                handle_bootstrap(args)
+            elif action == "add":
+                handle_add(args)
+            elif action == "today":
+                handle_today(args)
+            elif action == "query":
+                handle_query(args)
+            elif action == "recent":
+                handle_recent(args)
+            elif action == "search":
+                handle_search(args)
+            elif action == "complete":
+                handle_complete(args)
+            elif action == "cancel":
+                handle_cancel(args)
+            elif action == "summary":
+                handle_summary(args)
+            else:
+                json_output(False, action, f"未知的动作：{action}", {})
+                sys.exit(1)
+        except NotionQMError as e:
+            json_output(False, action, str(e), {})
+            sys.exit(1)
+        except Exception as e:
+            error_message = "未知错误：{}\n{}".format(str(e), traceback.format_exc())
+            json_output(False, action, error_message, {})
+            sys.exit(1)
     except Exception as e:
-        json_output(False, action, f"未知错误：{e}", {})
+        error_message = "严重错误：{}\n{}".format(str(e), traceback.format_exc())
+        json_output(False, "error", error_message, {})
         sys.exit(1)
 
 
