@@ -962,37 +962,7 @@ def handle_update_status(args: Dict[str, Any]) -> None:
     json_output(True, "update_status", f"任务状态已更新为 {status}", {"task": task})
 
 
-def handle_cancel(args: Dict[str, Any]) -> None:
-    api_key = args["notion_api_key"]
-    database_name = args["database_name"]
-    page_id = args.get("page_id")
-    text = args.get("text")
-    
-    resolved = resolve_database(api_key, database_name)
-    schema = retrieve_schema(api_key, resolved)
-    fields = build_field_map(schema)
-    
-    if not page_id:
-        cache = state_load()
-        last_task = cache.get("last_task")
-        if last_task:
-            page_id = last_task.get("page_id")
-        elif text:
-            task = find_task_by_text(api_key, resolved, schema, fields, text)
-            if task:
-                page_id = task["page_id"]
-    
-    if not page_id:
-        raise ConfigError("未找到任务，请提供任务 ID 或描述")
-    
-    task = update_task_status(api_key, resolved, schema, fields, page_id, "cancel")
-    
-    # 保存状态到缓存
-    cache = state_load()
-    cache["fields"] = fields
-    state_save(cache)
-    
-    json_output(True, "cancel", "任务已标记为已取消", {"task": task})
+
 
 
 def handle_summary(args: Dict[str, Any]) -> None:
@@ -1062,8 +1032,7 @@ def main() -> None:
                 handle_search(args)
             elif action == "update_status":
                 handle_update_status(args)
-            elif action == "cancel":
-                handle_cancel(args)
+
             elif action == "summary":
                 handle_summary(args)
             else:

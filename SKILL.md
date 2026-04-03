@@ -7,7 +7,7 @@ metadata:
     requires:
       bins:
         - python3
-    version: "0.1.1"
+    version: "0.1.2"
     author: "xt Shawn"
     license: "MIT"
 ---
@@ -159,22 +159,7 @@ python3 ./scripts/notion_quadrant_manager.py search '{"database_name":"xxx","que
 python3 ./scripts/notion_quadrant_manager.py update_status '{"database_name":"xxx","page_id":"任务ID","status":"进行中"}'
 ```
 
-### 5.6 cancel
-将任务标记为已取消。优先使用 `page_id`，否则使用最近一次任务上下文。
 
-**参数**：
-- `notion_api_key`：Notion API 密钥
-- `database_name`：数据库名称
-- `page_id`：任务 ID（可选）
-- `text`：任务描述（用于查找任务，可选）
-
-**返回**：
-- 更新后的任务信息
-
-**示例**：
-```bash
-python3 ./scripts/notion_quadrant_manager.py cancel '{"database_name":"xxx"}'
-```
 
 ### 5.7 summary
 按四象限统计待办任务数量，总结最近任务。
