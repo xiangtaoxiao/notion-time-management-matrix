@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import json
-import os
 import re
 import sys
 import traceback
@@ -486,12 +485,12 @@ def sort_tasks(tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted(
         tasks,
         key=lambda t: (
-            is_overdue(t),
-            quadrant_score(t),
-            due_date_value(t) or date.max,
-            t.get("created_time") or "",
+            not is_overdue(t),  # 反转 overdue 的排序，使 overdue 任务排在前面
+            -quadrant_score(t),  # 反转 quadrant_score，使高优先级排在前面
+            due_date_value(t) or date.min,  # 使日期早的排在前面
+            t.get("created_time") or "",  # 保持创建时间的排序
         ),
-        reverse=(True, False, False, False),
+        reverse=False,
     )
 
 
@@ -632,9 +631,9 @@ def create_task(api_key: str, resolved: Dict[str, Any], schema: Dict[str, Any], 
         properties[quadrant_key] = {quadrant_type: {"name": quadrant_value}}
     
     status_key = prop_key_for_page(schema, status_prop)
-    status_value = choose_option(status_prop, [task_data["status"]], True)
+    status_val = choose_option(status_prop, [task_data["status"]], True)
     status_type = prop_type(status_prop)
-    properties[status_key] = {status_type: {"name": status_value}}
+    properties[status_key] = {status_type: {"name": status_val}}
     
     if task_data.get("note"):
         note_key = prop_key_for_page(schema, note_prop)
@@ -706,8 +705,8 @@ def calculate_similarity(task: Dict[str, Any], query: str) -> int:
     
     # 四象限相似度
     quadrant = str(task.get("quadrant") or "").strip()
-    quadrant_score = match_title_score(quadrant, query)
-    score += quadrant_score
+    quadrant_score_val = match_title_score(quadrant, query)
+    score += quadrant_score_val
     
     return score
 
@@ -788,6 +787,11 @@ def handle_bootstrap(args: Dict[str, Any]) -> None:
     schema = retrieve_schema(api_key, resolved)
     fields = build_field_map(schema)
     
+    # 保存字段映射到缓存
+    cache = state_load()
+    cache["fields"] = fields
+    state_save(cache)
+    
     json_output(True, "bootstrap", "数据库连接成功", {
         "resolved": resolved,
         "fields": fields,
@@ -832,6 +836,11 @@ def handle_today(args: Dict[str, Any]) -> None:
     
     tasks = query_today_tasks(api_key, resolved, fields)
     
+    # 保存状态到缓存
+    cache = state_load()
+    cache["fields"] = fields
+    state_save(cache)
+    
     json_output(True, "today", f"今天有 {len(tasks)} 个未完成任务", {"tasks": tasks})
 
 
@@ -848,13 +857,18 @@ def handle_query(args: Dict[str, Any]) -> None:
         start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
         end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
     except Exception as e:
-        raise ConfigError(f"日期格式错误：{e}")
+        raise ConfigError(f"日期格式错误：{e}") from e
     
     resolved = resolve_database(api_key, database_name)
     schema = retrieve_schema(api_key, resolved)
     fields = build_field_map(schema)
     
     tasks = query_tasks_in_range(api_key, resolved, fields, start_date, end_date, status_list)
+    
+    # 保存状态到缓存
+    cache = state_load()
+    cache["fields"] = fields
+    state_save(cache)
     
     json_output(True, "query", f"{start_date} 到 {end_date} 期间有 {len(tasks)} 个任务", {"tasks": tasks})
 
@@ -863,13 +877,18 @@ def handle_recent(args: Dict[str, Any]) -> None:
     """查询最近 X 天的未完成任务（保持向后兼容）"""
     api_key = args["notion_api_key"]
     database_name = args["database_name"]
-    days = args.get("days", 7)
+    days = args.get("days", 3)
     
     resolved = resolve_database(api_key, database_name)
     schema = retrieve_schema(api_key, resolved)
     fields = build_field_map(schema)
     
     tasks = query_open_tasks_in_range(api_key, resolved, fields, days)
+    
+    # 保存状态到缓存
+    cache = state_load()
+    cache["fields"] = fields
+    state_save(cache)
     
     json_output(True, "recent", f"最近 {days} 天有 {len(tasks)} 个未完成任务", {"tasks": tasks})
 
@@ -885,6 +904,11 @@ def handle_search(args: Dict[str, Any]) -> None:
     fields = build_field_map(schema)
     
     tasks = search_tasks(api_key, resolved, schema, fields, query, limit=3)
+    
+    # 保存状态到缓存
+    cache = state_load()
+    cache["fields"] = fields
+    state_save(cache)
     
     json_output(True, "search", f"找到 {len(tasks)} 个相关任务", {"tasks": tasks})
 
@@ -914,6 +938,11 @@ def handle_complete(args: Dict[str, Any]) -> None:
     
     task = update_task_status(api_key, resolved, schema, fields, page_id, "done")
     
+    # 保存状态到缓存
+    cache = state_load()
+    cache["fields"] = fields
+    state_save(cache)
+    
     json_output(True, "complete", "任务已标记为已完成", {"task": task})
 
 
@@ -942,13 +971,18 @@ def handle_cancel(args: Dict[str, Any]) -> None:
     
     task = update_task_status(api_key, resolved, schema, fields, page_id, "cancel")
     
+    # 保存状态到缓存
+    cache = state_load()
+    cache["fields"] = fields
+    state_save(cache)
+    
     json_output(True, "cancel", "任务已标记为已取消", {"task": task})
 
 
 def handle_summary(args: Dict[str, Any]) -> None:
     api_key = args["notion_api_key"]
     database_name = args["database_name"]
-    days = args.get("days", 7)
+    days = args.get("days", 15)
     
     resolved = resolve_database(api_key, database_name)
     schema = retrieve_schema(api_key, resolved)
@@ -956,6 +990,11 @@ def handle_summary(args: Dict[str, Any]) -> None:
     
     tasks = query_open_tasks_in_range(api_key, resolved, fields, days)
     summary = generate_summary(tasks, days)
+    
+    # 保存状态到缓存
+    cache = state_load()
+    cache["fields"] = fields
+    state_save(cache)
     
     json_output(True, "summary", f"最近 {days} 天任务总结", {"summary": summary})
 
