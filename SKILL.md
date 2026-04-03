@@ -7,7 +7,7 @@ metadata:
     requires:
       bins:
         - python3
-    version: "0.1.2"
+    version: "0.1.3"
     author: "xt Shawn"
     license: "MIT"
 ---
@@ -108,25 +108,32 @@ python3 ./scripts/notion_quadrant_manager.py add '{"database_name":"xxx","title"
 ```
 
 ### 5.3 query
-查询指定时间范围内的任务，支持状态过滤。
+查询指定时间范围内的任务，支持状态过滤，可选择生成总结。
 
 **参数**：
 - `notion_api_key`：Notion API 密钥
 - `database_name`：数据库名称
-- `start_date`：开始日期（ISO 格式）
-- `end_date`：结束日期（ISO 格式）
+- `start_date`：开始日期（可选，格式：YYYY-MM-DD）
+- `end_date`：结束日期（可选，格式：YYYY-MM-DD）
+- `days`：天数（可选，当不提供 start_date 和 end_date 时使用，默认：7）
 - `status`：任务状态列表（可选，默认：["未开始", "进行中"]）
+- `summary`：是否生成总结（可选，默认：false）
 
 **返回**：
 - 指定时间范围内的任务列表（包含超时任务提醒）
+- 如果 summary 为 true，还返回四象限统计、重要紧急任务列表、超时任务列表和建议
 
 **示例**：
 ```bash
+# 查询指定日期范围的任务
 python3 ./scripts/notion_quadrant_manager.py query '{"database_name":"xxx","start_date":"2026-04-01","end_date":"2026-04-07","status":["未开始", "进行中"]}'
+
+# 查询最近 7 天的任务并生成总结
+python3 ./scripts/notion_quadrant_manager.py query '{"database_name":"xxx","days":7,"summary":true}'
 ```
 
 ### 5.4 search
-搜索指定任务，返回最相似的前 3 个任务。
+搜索指定任务。
 
 **参数**：
 - `notion_api_key`：Notion API 密钥
@@ -142,40 +149,29 @@ python3 ./scripts/notion_quadrant_manager.py search '{"database_name":"xxx","que
 ```
 
 ### 5.5 update_status
-更新任务状态。优先使用 `page_id`，否则使用最近一次任务上下文。
+更新任务状态和/或截止日期。优先使用 `page_id`，否则使用最近一次任务上下文。
 
 **参数**：
 - `notion_api_key`：Notion API 密钥
 - `database_name`：数据库名称
 - `page_id`：任务 ID（可选）
 - `text`：任务描述（用于查找任务，可选）
-- `status`：任务状态（如：未开始、进行中、完成等）
+- `status`：任务状态（可选，如：未开始、进行中、完成等）
+- `due_date`：任务截止日期（可选，格式：YYYY-MM-DD）
 
 **返回**：
 - 更新后的任务信息
 
 **示例**：
 ```bash
+# 更新任务状态为进行中
 python3 ./scripts/notion_quadrant_manager.py update_status '{"database_name":"xxx","page_id":"任务ID","status":"进行中"}'
-```
 
-### 5.6 summary
-按四象限统计待办任务数量，总结最近任务。
+# 更新任务截止日期
+python3 ./scripts/notion_quadrant_manager.py update_status '{"database_name":"xxx","page_id":"任务ID","due_date":"2026-04-15"}'
 
-**参数**：
-- `notion_api_key`：Notion API 密钥
-- `database_name`：数据库名称
-- `days`：天数（默认：15）
-
-**返回**：
-- 四象限统计
-- 重要紧急任务列表
-- 超时任务列表
-- 基于四象限时间管理法则给出的建议
-
-**示例**：
-```bash
-python3 ./scripts/notion_quadrant_manager.py summary '{"database_name":"xxx","days":7}'
+# 同时更新任务状态和截止日期
+python3 ./scripts/notion_quadrant_manager.py update_status '{"database_name":"xxx","page_id":"任务ID","status":"进行中","due_date":"2026-04-15"}'
 ```
 
 ## 6. 四象限处理
@@ -183,6 +179,7 @@ python3 ./scripts/notion_quadrant_manager.py summary '{"database_name":"xxx","da
 ### 6.1 写入数据时四象限推测规则
 - 是否重要：任务内容凡涉及领导、父母等重要关系人，涉及学习、健康、资金处理、晋升，涉及事先承诺的均为重要
 - 是否紧急：任务完成日期距今天小于等于2天的均为紧急
+- 如判定成功，请再写入数据完成后告知用户写入的四象限分类
 - 如无法判定重要性或紧急性，直接询问用户四象限分类
 
 ### 6.2 总结分析流程

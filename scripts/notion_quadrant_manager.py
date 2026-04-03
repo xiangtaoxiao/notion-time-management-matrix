@@ -845,17 +845,24 @@ def handle_today(args: Dict[str, Any]) -> None:
 
 
 def handle_query(args: Dict[str, Any]) -> None:
-    """查询指定时间范围内的任务"""
+    """查询指定时间范围内的任务，可选择生成总结"""
     api_key = args["notion_api_key"]
     database_name = args["database_name"]
-    start_date_str = args["start_date"]
-    end_date_str = args["end_date"]
+    start_date_str = args.get("start_date")
+    end_date_str = args.get("end_date")
+    days = args.get("days", 7)
     status_list = args.get("status", ["未开始", "进行中"])
+    summary = args.get("summary", False)
     
     # 解析日期
     try:
-        start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
-        end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+        if start_date_str and end_date_str:
+            start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+            end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+        else:
+            # 使用 days 参数计算日期范围
+            end_date = date.today()
+            start_date = end_date - timedelta(days=days)
     except Exception as e:
         raise ConfigError(f"日期格式错误：{e}") from e
     
@@ -870,7 +877,15 @@ def handle_query(args: Dict[str, Any]) -> None:
     cache["fields"] = fields
     state_save(cache)
     
-    json_output(True, "query", f"{start_date} 到 {end_date} 期间有 {len(tasks)} 个任务", {"tasks": tasks})
+    if summary:
+        # 生成总结
+        summary_data = generate_summary(tasks, (end_date - start_date).days + 1)
+        json_output(True, "query", f"{start_date} 到 {end_date} 期间任务总结", {
+            "tasks": tasks,
+            "summary": summary_data
+        })
+    else:
+        json_output(True, "query", f"{start_date} 到 {end_date} 期间有 {len(tasks)} 个任务", {"tasks": tasks})
 
 
 def handle_recent(args: Dict[str, Any]) -> None:
@@ -919,9 +934,10 @@ def handle_update_status(args: Dict[str, Any]) -> None:
     page_id = args.get("page_id")
     text = args.get("text")
     status = args.get("status")
+    due_date = args.get("due_date")
     
-    if not status:
-        raise ConfigError("未提供任务状态，请指定 status 参数")
+    if not status and not due_date:
+        raise ConfigError("未提供任务状态或截止日期，请至少指定一个参数")
     
     resolved = resolve_database(api_key, database_name)
     schema = retrieve_schema(api_key, resolved)
@@ -940,16 +956,21 @@ def handle_update_status(args: Dict[str, Any]) -> None:
     if not page_id:
         raise ConfigError("未找到任务，请提供任务 ID 或描述")
     
-    # 直接使用用户指定的状态
-    status_prop = fields["status"]
-    status_key = prop_key_for_page(schema, status_prop)
-    status_type = prop_type(status_prop)
+    # 构建更新请求体
+    body = {"properties": {}}
     
-    body = {
-        "properties": {
-            status_key: {status_type: {"name": status}},
-        },
-    }
+    # 更新状态
+    if status:
+        status_prop = fields["status"]
+        status_key = prop_key_for_page(schema, status_prop)
+        status_type = prop_type(status_prop)
+        body["properties"][status_key] = {status_type: {"name": status}}
+    
+    # 更新截止日期
+    if due_date:
+        due_prop = fields["due"]
+        due_key = prop_key_for_page(schema, due_prop)
+        body["properties"][due_key] = {"date": {"start": due_date}}
     
     result = notion_request(api_key, "PATCH", f"/pages/{page_id}", body=body)
     task = page_to_task(result, schema, fields)
@@ -959,7 +980,14 @@ def handle_update_status(args: Dict[str, Any]) -> None:
     cache["fields"] = fields
     state_save(cache)
     
-    json_output(True, "update_status", f"任务状态已更新为 {status}", {"task": task})
+    # 构建消息
+    messages = []
+    if status:
+        messages.append(f"任务状态已更新为 {status}")
+    if due_date:
+        messages.append(f"任务截止日期已更新为 {due_date}")
+    
+    json_output(True, "update_status", "，".join(messages), {"task": task})
 
 
 
