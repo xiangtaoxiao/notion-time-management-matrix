@@ -10,6 +10,9 @@ metadata:
     version: "1.1.0"
     author: "xt Shawn"
     license: "MIT"
+    config:
+      api_key_path: "~/.config/notion/api_key"
+      database_name_path: "~/.config/notion/database_name"
 ---
 
 # Notion 四象限任务管理
@@ -53,6 +56,15 @@ metadata:
 - **作用**：缓存数据库连接信息、字段映射和任务数据，提高操作效率
 - **注意事项**：确保脚本所在目录有写入权限
 - **访问方式**：通过 `get_state` 动作获取状态文件中的数据库相关信息，禁止阅读状态文件
+
+### 2.4 依赖安装
+脚本需要以下 Python 依赖：
+- `requests`：用于发送 HTTP 请求到 Notion API
+
+安装依赖的命令：
+```bash
+pip3 install requests
+```
 
 ## 3. 必要字段
 
