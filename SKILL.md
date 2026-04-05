@@ -7,7 +7,7 @@ metadata:
     requires:
       bins:
         - python3
-    version: "0.1.4"
+    version: "1.1.0"
     author: "xt Shawn"
     license: "MIT"
 ---
@@ -34,6 +34,7 @@ metadata:
    mkdir -p ~/.config/notion
    echo "your_api_key_here" > ~/.config/notion/api_key
    ```
+- 禁止从memory记忆文件或TOOLS.md文件或上下文获取API密钥。
 
 ### 2.2 数据库配置
 用户需要提供数据库名称，执行以下命令存储数据库名称：
@@ -47,6 +48,7 @@ metadata:
 - 禁止在脚本调用失败时自行调用Notion API。
 
 ### 2.3 状态文件
+- **初始化**：如果状态文件不存在或不完整，调用get_state创建文件并了解数据库基本情况。
 - **存储位置**：脚本notion_quadrant_manager.py所在目录下的 `notion_quadrant_manager_state.json`
 - **作用**：缓存数据库连接信息、字段映射和任务数据，提高操作效率
 - **注意事项**：确保脚本所在目录有写入权限
@@ -73,7 +75,7 @@ python3 ./scripts/notion_quadrant_manager.py <action> '<json_args>'
 ## 5. 可调用动作
 
 ### 5.1 get_state
-获取状态文件中 database 的相关信息，用于 AI 了解数据库基本情况，并识别必要字段。如果状态文件不存在或不完整，会自动执行 bootstrap 操作。
+获取database 的相关信息，用于 AI 理解用户数据库的基本情况，并识别必要字段。
 
 **参数**：
 - 无需传递参数
@@ -114,8 +116,10 @@ python3 ./scripts/notion_quadrant_manager.py add '{"title":"去北京","due_date
 **参数**：
 - `start_date`：开始日期（可选，格式：YYYY-MM-DD）
 - `end_date`：结束日期（可选，格式：YYYY-MM-DD）
-- `days`：天数（可选，当不提供 start_date 和 end_date 时使用，默认：7）
+- `days`：天数（可选，当不提供 start_date 和 end_date 时使用，不传时默认：7）
 - `status`：任务状态列表（可选，默认：["未开始", "进行中"]）
+- `category`：任务分类（可选）
+- `quadrant`：任务四象限（可选，如：重要紧急、紧急不重要、重要不紧急、不重要不紧急）
 - `summary`：是否生成总结（当用户要求总结时传true，默认：false）
 
 **返回**：
@@ -129,6 +133,9 @@ python3 ./scripts/notion_quadrant_manager.py query '{"start_date":"2026-04-01","
 
 # 查询最近 7 天的任务并生成总结
 python3 ./scripts/notion_quadrant_manager.py query '{"days":7,"summary":true}'
+
+# 查询指定分类和四象限的任务
+python3 ./scripts/notion_quadrant_manager.py query '{"days":7,"category":"工作","quadrant":"重要紧急"}'
 ```
 
 ### 5.4 search
@@ -149,7 +156,7 @@ python3 ./scripts/notion_quadrant_manager.py search '{"query":"北京出差"}'
 更新任务状态和/或截止日期。优先使用任务标题或备注进行精确匹配，更新失败或不确定具体任务参数就使用search方法和用户确认。
 
 **参数**：
-- `title`：任务标题（用于查找任务，可选）
+- `title`：任务标题（用于查找任务，必选）
 - `note`：任务备注（用于查找任务，可选）
 - `status`：任务状态（可选，如：未开始、进行中、完成等）
 - `due_date`：任务截止日期（可选，格式：YYYY-MM-DD）
@@ -198,5 +205,20 @@ Python 脚本返回 JSON，至少包含：
 - `data`：操作结果数据
 
 Agent 读取 JSON 后，根据回复消息的平台（微信、飞书等），选择合适的排版（列表、表格、分割线、图标等）对齐并罗列任务，组织自然语言回复给用户，保证内容清晰，重点突出。
+**微信QQ示例**：
+```
+⏰ 超时任务 x2
+1.title-1（进行中/3.28/重要紧急）
+2.title-2（进行中/3.28/重要紧急）
+
+⏳ 即将到期 x1
+1.title-3（未开始/4.8/重要紧急）⚠️工作
+
+共3项，2项重要不紧急，1项不重要不紧急
+
+👉 建议
+
+```
+
 
 
