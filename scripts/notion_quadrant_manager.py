@@ -890,6 +890,27 @@ def handle_query(args: Dict[str, Any]) -> None:
     if summary:
         # 生成总结
         summary_data = generate_summary(tasks, (end_date - start_date).days + 1)
+        
+        # 检查是否需要添加建议提前完成任务列表
+        has_important_tasks = any(task.get("quadrant") in ["重要紧急", "重要不紧急"] for task in tasks)
+        has_overdue_tasks = any(task.get("overdue") for task in tasks)
+        
+        if not has_important_tasks and not has_overdue_tasks:
+            # 查询数据库里所有未完成的重要紧急和重要不紧急任务
+            ds_id = resolved["data_source_id"]
+            # 查询所有任务
+            all_pages = query_data_source(api_key, ds_id, {})
+            all_open_tasks = [page_to_task(p, {}, fields) for p in all_pages if page_matches_open(page_to_task(p, {}, fields))]
+            
+            # 过滤出重要紧急和重要不紧急任务
+            important_tasks = [task for task in all_open_tasks if task.get("quadrant") in ["重要紧急", "重要不紧急"]]
+            
+            # 按截止日期排序
+            important_tasks.sort(key=lambda t: due_date_value(t) or date.max)
+            
+            # 添加到总结中
+            summary_data["suggested_tasks"] = important_tasks
+        
         json_output(True, "query", f"{start_date} 到 {end_date} 期间任务总结", {
             "tasks": tasks,
             "summary": summary_data
