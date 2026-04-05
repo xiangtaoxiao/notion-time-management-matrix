@@ -40,7 +40,7 @@ metadata:
 - `notion_database_name`：数据库名称
 
 - 如果数据库名称不存在、Notion 连接失败、或缺少必需字段，则提示用户修正配置。
-- 禁止从memory记忆文件或TOOLS.md文件获取数据库名称。
+- 禁止从memory记忆文件或TOOLS.md文件或上下文获取数据库名称。
 
 ### 2.3 状态文件
 - **存储位置**：脚本notion_quadrant_manager.py所在目录下的 `notion_quadrant_manager_state.json`
@@ -68,7 +68,6 @@ python3 ./scripts/notion_quadrant_manager.py <action> '<json_args>'
 `json_args` 必须包含：
 - `database_name`：数据库名称
 - 除非执行bootstrap动作，否则数据库名称必须取自`notion_quadrant_manager_state.json`文件
-- 禁止基于历史任务上下文推断数据库名称
 
 API 密钥会自动从 `~/.config/notion/api_key` 文件读取。
 
@@ -122,7 +121,7 @@ python3 ./scripts/notion_quadrant_manager.py add '{"database_name":"xxx","title"
 - `end_date`：结束日期（可选，格式：YYYY-MM-DD）
 - `days`：天数（可选，当不提供 start_date 和 end_date 时使用，默认：7）
 - `status`：任务状态列表（可选，默认：["未开始", "进行中"]）
-- `summary`：是否生成总结（可选，默认：false）
+- `summary`：是否生成总结（当用户要求总结时传true，默认：false）
 
 **返回**：
 - 指定时间范围内的任务列表（包含超时任务提醒）

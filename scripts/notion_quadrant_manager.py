@@ -546,7 +546,7 @@ def build_date_filter(fields: Dict[str, Dict[str, Any]], start: date, end: date)
 
 
 def query_tasks_in_range(api_key: str, resolved: Dict[str, Any], fields: Dict[str, Dict[str, Any]], start_date: date, end_date: date, status_list: List[str] = None) -> List[Dict[str, Any]]:
-    """查询指定时间范围内的任务，支持状态过滤"""
+    """查询指定时间范围内的任务，支持状态过滤，包含所有超时任务"""
     ds_id = resolved["data_source_id"]
     
     # 构建日期过滤器
@@ -580,10 +580,20 @@ def query_tasks_in_range(api_key: str, resolved: Dict[str, Any], fields: Dict[st
     range_pages = query_data_source(api_key, ds_id, combined_filter)
     range_tasks = [page_to_task(p, {}, fields) for p in range_pages]
     
-    # 标记超时任务
+    # 查询所有任务（用于检查超时）
+    # 这里我们查询所有任务，然后在代码中过滤出未完成的任务
+    all_pages = query_data_source(api_key, ds_id, {})
+    all_open_tasks = [page_to_task(p, {}, fields) for p in all_pages if page_matches_open(page_to_task(p, {}, fields))]
+    
+    # 标记超时任务（不受查询范围影响）
     for task in range_tasks:
-        if is_overdue(task):
+        task["overdue"] = is_overdue(task)
+    
+    # 添加所有超时任务（即使不在查询范围内）
+    for task in all_open_tasks:
+        if is_overdue(task) and not any(t.get("page_id") == task.get("page_id") for t in range_tasks):
             task["overdue"] = True
+            range_tasks.append(task)
     
     # 按状态过滤
     if status_list:
@@ -860,9 +870,9 @@ def handle_query(args: Dict[str, Any]) -> None:
             start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
             end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
         else:
-            # 使用 days 参数计算日期范围
-            end_date = date.today()
-            start_date = end_date - timedelta(days=days)
+            # 使用 days 参数计算日期范围（往后 days 天）
+            start_date = date.today()
+            end_date = start_date + timedelta(days=days)
     except Exception as e:
         raise ConfigError(f"日期格式错误：{e}") from e
     
