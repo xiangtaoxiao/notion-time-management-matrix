@@ -676,7 +676,7 @@ def query_tasks_in_range(api_key: str, resolved: Dict[str, Any], fields: Dict[st
 
 def query_open_tasks_in_range(api_key: str, resolved: Dict[str, Any], fields: Dict[str, Dict[str, Any]], days: int) -> List[Dict[str, Any]]:
     """查询最近 X 天的未完成任务（保持向后兼容）"""
-    start = today() - timedelta(days=days)
+    start = today()
     end = today() + timedelta(days=days)
     return query_tasks_in_range(api_key, resolved, fields, start, end, ["未开始", "进行中"])
 
