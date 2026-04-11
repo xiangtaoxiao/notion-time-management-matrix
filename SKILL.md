@@ -7,7 +7,7 @@ metadata:
     requires:
       bins:
         - python3
-    version: "1.1.1"
+    version: "1.1.3"
     author: "xt Shawn"
     license: "MIT"
     config:
